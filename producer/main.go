@@ -9,6 +9,8 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/segmentio/kafka-go"
 )
 
 func main() {
@@ -17,10 +19,24 @@ func main() {
 		port = "8080"
 	}
 
-	// Initialize handler struct
-	eventHandler := &EventHandler{}
+	kafkaBroker := os.Getenv("KAFKA_BROKERS")
+	if kafkaBroker == "" {
+		kafkaBroker = "localhost:9092" // Default for local testing outside Docker
+	}
 
-	// Setup the router and connect the struct's method
+	// Initialize the Kafka Writer
+	kafkaWriter := &kafka.Writer{
+		Addr:                   kafka.TCP(kafkaBroker),
+		Topic:                  "incoming.user_activity",
+		Balancer:               &kafka.LeastBytes{}, // Distributes messages evenly across partitions
+		AllowAutoTopicCreation: true,
+	}
+
+	// Inject the Writer into our Handler
+	eventHandler := &EventHandler{
+		kafkaWriter: kafkaWriter,
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /events", eventHandler.handleIncomingEvent)
 
@@ -28,7 +44,6 @@ func main() {
 		Addr:    ":" + port,
 		Handler: mux,
 	}
-
 	// --- Graceful Shutdown Setup ---
 	stopChan := make(chan os.Signal, 1)
 	signal.Notify(stopChan, os.Interrupt, syscall.SIGTERM)
