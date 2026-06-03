@@ -3,7 +3,7 @@
 # because the consumer only reads from Kafka and doesn't expose HTTP ports.
 
 # Build ----------------
-FROM golang:1.22-alpine AS builder
+FROM golang:alpine AS builder
 
 # Install necessary dependencies for compilation if needed
 RUN apk add --no-cache git ca-certificates tzdata
@@ -21,7 +21,7 @@ COPY . .
 # - CGO_ENABLED=0: Disables dynamic linking to C libraries, generating a purely static binary.
 # - GOOS=linux: Ensures the binary is compiled for the Linux kernel.
 # - ldflags "-s -w": Reduces binary size by removing the symbol table and debugging information.
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o analytics-consumer ./main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o analytics-consumer .
 
 # Minimal Execution Environment ----------------
 FROM alpine:3.19 AS runner

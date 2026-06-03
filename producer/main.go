@@ -38,7 +38,7 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /events", eventHandler.handleIncomingEvent)
+	mux.HandleFunc("/events", eventHandler.handleIncomingEvent)
 
 	srv := &http.Server{
 		Addr:    ":" + port,
