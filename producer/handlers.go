@@ -38,7 +38,7 @@ func (h *EventHandler) handleIncomingEvent(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// 1. Serialize the validated struct back to JSON
+	// Serialize the validated struct back to JSON
 	messageBytes, err := json.Marshal(activity)
 	if err != nil {
 		log.Printf("Error marshalling activity: %v", err)
@@ -46,7 +46,7 @@ func (h *EventHandler) handleIncomingEvent(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// 2. Publish to Kafka
+	// Publish to Kafka
 	err = h.kafkaWriter.WriteMessages(r.Context(),
 		kafka.Message{
 			Key:   []byte(activity.UserID),

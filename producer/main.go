@@ -44,6 +44,7 @@ func main() {
 		Addr:    ":" + port,
 		Handler: mux,
 	}
+
 	// --- Graceful Shutdown Setup ---
 	stopChan := make(chan os.Signal, 1)
 	signal.Notify(stopChan, os.Interrupt, syscall.SIGTERM)

@@ -2,36 +2,34 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"log"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
 
-	"analytics-consumer/internal/db" // Adjust this if your go.mod name is different
-	"github.com/jackc/pgx/v5/pgxpool"
+	"analytics-consumer/internal/db"
+
 	"github.com/segmentio/kafka-go"
 )
 
 func main() {
-	// 1. Setup Database Connection using pgxpool
-    dbURL := os.Getenv("DATABASE_URL")
-    if dbURL == "" {
-        dbURL = "postgres://analytics_user:analytics_password@localhost:5432/analytics_db"
-    }
+	// Initialize Database Connection
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		dbURL = "postgres://analytics_user:analytics_password@localhost:5432/analytics_db?sslmode=disable"
+	}
 
-    // pgxpool handles connection pooling automatically
-    pool, err := pgxpool.New(context.Background(), dbURL)
-    if err != nil {
-        log.Fatalf("Could not connect to database: %v", err)
-    }
-    defer pool.Close()
+	// Call the cleaner helper function
+	dbConn, err := InitDB(dbURL)
+	if err != nil {
+		log.Fatalf("Database initialization failed: %v", err)
+	}
+	defer dbConn.Close()
 
-    queries := db.New(db.NewQuerier(pool))
-    log.Println("Connected to PostgreSQL successfully.")
+	queries := db.New(dbConn)
 
-	// 2. Setup Kafka Reader
+	// Setup Kafka Reader
 	kafkaBroker := os.Getenv("KAFKA_BROKERS")
 	if kafkaBroker == "" {
 		kafkaBroker = "localhost:9092"
@@ -45,13 +43,13 @@ func main() {
 	})
 	defer reader.Close()
 
-	// 3. Initialize the Processor Struct (Dependency Injection)
+	// Initialize the Processor Struct (Dependency Injection)
 	processor := &EventProcessor{
 		queries: queries,
 		reader:  reader,
 	}
 
-	// 4. Graceful Shutdown & Concurrency Setup
+	// Graceful Shutdown & Concurrency Setup
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 
@@ -61,7 +59,7 @@ func main() {
 	// Launch 3 concurrent workers via the struct method
 	processor.StartWorkers(ctx, &wg, 3)
 
-	// 5. Wait for shutdown signal
+	// Wait for shutdown signal
 	<-stopChan
 	log.Println("Termination signal received. Shutting down gracefully...")
 	cancel()  // This tells all workers to stop reading
