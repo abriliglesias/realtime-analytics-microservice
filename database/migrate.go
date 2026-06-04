@@ -10,7 +10,7 @@ import (
 
 func main() {
 	// 1. Connect to the local Docker database
-	dbURL := "postgres://analytics_user:analytics_password@localhost:5432/analytics_db?sslmode=disable"
+	dbURL := "postgres://user:password@localhost:5432/analytics?sslmode=disable"
 	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
 		log.Fatalf("Could not connect to database: %v", err)

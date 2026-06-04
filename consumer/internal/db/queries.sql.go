@@ -7,25 +7,50 @@ package db
 
 import (
 	"context"
-	"time"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const upsertUserActivity = `-- name: UpsertUserActivity :exec
-INSERT INTO user_metrics (user_id, page_view_count, last_active_timestamp)
-VALUES ($1, $2, $3)
-ON CONFLICT (user_id)
-DO UPDATE SET 
-    page_view_count = user_metrics.page_view_count + EXCLUDED.page_view_count,
-    last_active_timestamp = EXCLUDED.last_active_timestamp
+const getUserMetrics = `-- name: GetUserMetrics :one
+SELECT
+    user_id,
+    page_view_count,
+    last_active_at
+FROM user_metrics
+WHERE user_id = $1
 `
 
-type UpsertUserActivityParams struct {
-	UserID              string    `json:"user_id"`
-	PageViewCount       int32     `json:"page_view_count"`
-	LastActiveTimestamp time.Time `json:"last_active_timestamp"`
+// Called by GET /metrics?user_id=X in the producer API.
+// This is an O(1) primary-key lookup — no aggregation required at read time
+// because all counting was done atomically at write time.
+func (q *Queries) GetUserMetrics(ctx context.Context, userID string) (UserMetric, error) {
+	row := q.db.QueryRow(ctx, getUserMetrics, userID)
+	var i UserMetric
+	err := row.Scan(&i.UserID, &i.PageViewCount, &i.LastActiveAt)
+	return i, err
 }
 
-func (q *Queries) UpsertUserActivity(ctx context.Context, arg UpsertUserActivityParams) error {
-	_, err := q.db.ExecContext(ctx, upsertUserActivity, arg.UserID, arg.PageViewCount, arg.LastActiveTimestamp)
+const upsertUserMetrics = `-- name: UpsertUserMetrics :exec
+
+INSERT INTO user_metrics (user_id, page_view_count, last_active_at)
+VALUES ($1, $2, $3)
+ON CONFLICT (user_id)
+DO UPDATE SET
+    page_view_count = user_metrics.page_view_count + EXCLUDED.page_view_count,
+    last_active_at  = EXCLUDED.last_active_at
+`
+
+type UpsertUserMetricsParams struct {
+	UserID        string           `json:"user_id"`
+	PageViewCount int32            `json:"page_view_count"`
+	LastActiveAt  pgtype.Timestamp `json:"last_active_at"`
+}
+
+// file: database/queries/user_metrics.sql
+// Called by the consumer worker for every incoming event.
+// The ON CONFLICT clause performs an atomic read-modify-write inside Postgres,
+// which is safe under the concurrent writes produced by the 3-worker pool.
+func (q *Queries) UpsertUserMetrics(ctx context.Context, arg UpsertUserMetricsParams) error {
+	_, err := q.db.Exec(ctx, upsertUserMetrics, arg.UserID, arg.PageViewCount, arg.LastActiveAt)
 	return err
 }

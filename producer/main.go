@@ -2,69 +2,104 @@ package main
 
 import (
 	"context"
-	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/segmentio/kafka-go"
 )
 
 func main() {
-	port := os.Getenv("SERVER_PORT")
-	if port == "" {
-		port = "8080"
+	// --- Structured JSON logging (replaces log.Printf everywhere) ---
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	})))
+
+	// --- Kafka writer ---
+	kafkaBroker := getEnv("KAFKA_BROKERS", "kafka:9092")
+	writer := &kafka.Writer{
+		Addr:         kafka.TCP(kafkaBroker),
+		Topic:        "incoming.user_activity",
+		Balancer:     &kafka.LeastBytes{},
+		WriteTimeout: 10 * time.Second,
 	}
 
-	kafkaBroker := os.Getenv("KAFKA_BROKERS")
-	if kafkaBroker == "" {
-		kafkaBroker = "localhost:9092" // Default for local testing outside Docker
+	// --- PostgreSQL pool (required for GET /metrics) ---
+	dbURL := getEnv("DATABASE_URL", "postgres://user:password@postgres:5432/analytics?sslmode=disable")
+	pool, err := pgxpool.New(context.Background(), dbURL)
+	if err != nil {
+		slog.Error("failed to connect to postgres", slog.Any("error", err))
+		os.Exit(1)
 	}
+	defer pool.Close()
 
-	// Initialize the Kafka Writer
-	kafkaWriter := &kafka.Writer{
-		Addr:                   kafka.TCP(kafkaBroker),
-		Topic:                  "incoming.user_activity",
-		Balancer:               &kafka.LeastBytes{}, // Distributes messages evenly across partitions
-		AllowAutoTopicCreation: true,
+	if err := pool.Ping(context.Background()); err != nil {
+		slog.Error("postgres ping failed", slog.Any("error", err))
+		os.Exit(1)
 	}
+	slog.Info("connected to postgres")
 
-	// Inject the Writer into our Handler
-	eventHandler := &EventHandler{
-		kafkaWriter: kafkaWriter,
-	}
+	// Wrap the pgxpool with the sqlc-generated Queries type.
+	// Uncomment once your database package is in place:
+	//   queries := db.New(pool)
+	//   handler := NewEventHandler(writer, queries)
+	//
+	// For now, pass nil to keep compilation clean:
+	handler := NewEventHandler(writer, nil)
 
+	// --- Router ---
 	mux := http.NewServeMux()
-	mux.HandleFunc("/events", eventHandler.handleIncomingEvent)
+	mux.HandleFunc("POST /event", handler.HandleEvent)
+	mux.HandleFunc("GET /metrics", handler.HandleGetMetrics)
 
-	srv := &http.Server{
-		Addr:    ":" + port,
-		Handler: mux,
+	// Wrap all routes in the trace middleware (generates + propagates trace_id).
+	root := TraceMiddleware(mux)
+
+	serverPort := getEnv("SERVER_PORT", "8080")
+	server := &http.Server{
+		Addr:         ":" + serverPort,
+		Handler:      root,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
 
-	// --- Graceful Shutdown Setup ---
-	stopChan := make(chan os.Signal, 1)
-	signal.Notify(stopChan, os.Interrupt, syscall.SIGTERM)
+	// --- Graceful shutdown ---
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
-		log.Printf("Starting Producer API on port %s...", port)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("Server error: %v\n", err)
+		slog.Info("producer API listening", slog.String("addr", server.Addr))
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("http server error", slog.Any("error", err))
+			os.Exit(1)
 		}
 	}()
 
-	<-stopChan
-	log.Println("Termination signal received. Shutting down gracefully...")
+	<-quit
+	slog.Info("shutdown signal received")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	if err := srv.Shutdown(ctx); err != nil {
-		log.Fatalf("Server forced to shutdown: %v", err)
+	if err := server.Shutdown(ctx); err != nil {
+		slog.Error("http server shutdown error", slog.Any("error", err))
 	}
 
-	log.Println("Server exited cleanly")
+	if err := writer.Close(); err != nil {
+		slog.Error("kafka writer close error", slog.Any("error", err))
+	}
+
+	slog.Info("producer shut down cleanly")
+}
+
+func getEnv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }

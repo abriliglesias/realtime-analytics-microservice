@@ -9,6 +9,7 @@ import (
 
 	"analytics-consumer/internal/db" // Adjust this if your go.mod name is different
 
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/segmentio/kafka-go"
 )
 
@@ -65,10 +66,10 @@ func (p *EventProcessor) worker(ctx context.Context, wg *sync.WaitGroup, workerI
 		}
 
 		// Save to Database using the generated sqlc code
-		err = p.queries.UpsertUserActivity(ctx, db.UpsertUserActivityParams{
-			UserID:              activity.UserID,
-			PageViewCount:       pageViewIncrement,
-			LastActiveTimestamp: activity.Timestamp,
+		err = p.queries.UpsertUserMetrics(ctx, db.UpsertUserMetricsParams{
+			UserID:        activity.UserID,
+			PageViewCount: pageViewIncrement,
+			LastActiveAt:  pgtype.Timestamp{Time: activity.Timestamp, Valid: true},
 		})
 
 		if err != nil {

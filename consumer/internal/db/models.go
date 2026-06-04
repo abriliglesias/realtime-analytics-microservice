@@ -5,11 +5,11 @@
 package db
 
 import (
-	"time"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 type UserMetric struct {
-	UserID              string    `json:"user_id"`
-	PageViewCount       int32     `json:"page_view_count"`
-	LastActiveTimestamp time.Time `json:"last_active_timestamp"`
+	UserID        string           `json:"user_id"`
+	PageViewCount int32            `json:"page_view_count"`
+	LastActiveAt  pgtype.Timestamp `json:"last_active_at"`
 }
