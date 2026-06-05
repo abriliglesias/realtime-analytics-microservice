@@ -181,8 +181,8 @@ create-topic: check-docker ## Create main + DLQ Kafka topics — idempotent, saf
 	    --replication-factor $(KAFKA_REPLICATION_FACTOR)
 	@echo "Topics ready (created or already existed)"
 	@echo "Restarting consumer to pick up new topics..."
-    $(DC) restart consumer
-
+	$(DC) restart consumer
+	
 # =============================================================================
 ##@ Testing / Quality
 # =============================================================================
