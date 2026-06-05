@@ -6,6 +6,10 @@ sql:
     gen:
       go:
         package: "db"
-        out: "../consumer/internal/db"
+        out: "../internal/db"
         sql_package: "pgx/v5"
+        emit_prepared_queries: false
+        emit_interface: true          # generates Querier interface — needed for mocking in tests
+        emit_exact_table_names: false
+        emit_empty_slices: true
         emit_json_tags: true

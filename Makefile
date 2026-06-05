@@ -31,8 +31,8 @@ SHELL        := /bin/bash
 export
 
 # ── Defaults ────────
-PRODUCER_PORT             ?= 8080
-PRODUCER_PORT_LOC         ?= 8081
+PRODUCER_PORT             ?= 8081
+PRODUCER_PORT_LOC         ?= 8080
 KAFKA_BROKERS             ?= localhost:9092
 KAFKA_TOPIC               ?= incoming.user_activity
 KAFKA_DLQ_TOPIC           ?= incoming.user_activity.dlq
@@ -180,6 +180,8 @@ create-topic: check-docker ## Create main + DLQ Kafka topics — idempotent, saf
 	    --partitions 1 \
 	    --replication-factor $(KAFKA_REPLICATION_FACTOR)
 	@echo "Topics ready (created or already existed)"
+	@echo "Restarting consumer to pick up new topics..."
+    $(DC) restart consumer
 
 # =============================================================================
 ##@ Testing / Quality

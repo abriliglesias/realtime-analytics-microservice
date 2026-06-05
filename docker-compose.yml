@@ -82,34 +82,31 @@ services:
       start_period: 10s
 
   # GO MICROSERVICES -------------------------------------------------------------------------
+  
   producer:
-  # -------------------------------------------------------------------------
     build:
-      context: ./producer
-      dockerfile: Dockerfile
+      context: .                        
+      dockerfile: producer/Dockerfile   
     ports:
-      - "8080:8080"
+      - "${PRODUCER_PORT:-8081}:8081"
     environment:
       KAFKA_BROKER: kafka:9092
-      DATABASE_URL: postgres://user:password@postgres:5432/analytics?sslmode=disable
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+      SERVER_PORT: "8081"
     depends_on:
       kafka:
-        # IMPORTANT: service_healthy (not service_started) — the producer will
-        # not start until Kafka's kafka-topics.sh health check passes.
         condition: service_healthy
       postgres:
         condition: service_healthy
     restart: on-failure
-
-  # -------------------------------------------------------------------------
+ 
   consumer:
-  # -------------------------------------------------------------------------
     build:
-      context: ./consumer
-      dockerfile: Dockerfile
+      context: .                       
+      dockerfile: consumer/Dockerfile
     environment:
       KAFKA_BROKER: kafka:9092
-      DATABASE_URL: postgres://user:password@postgres:5432/analytics?sslmode=disable
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
     depends_on:
       kafka:
         condition: service_healthy

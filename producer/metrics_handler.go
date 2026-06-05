@@ -2,25 +2,28 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // -------------------------------------------------------------------
 // Querier interface (mirrors what sqlc generates)
 // -------------------------------------------------------------------
 
-type Querier interface {
-	GetUserMetrics(ctx interface{ Done() <-chan struct{} }, userID string) (*UserMetrics, error)
-}
+//type Querier interface {
+//	GetUserMetrics(ctx interface{ Done() <-chan struct{} }, userID string) (*UserMetrics, error)
+//}
 
 // UserMetrics mirrors the sqlc-generated row type for the user_metrics table.
-type UserMetrics struct {
-	UserID        string    `json:"user_id"`
-	PageViewCount int64     `json:"page_view_count"`
-	LastActiveAt  time.Time `json:"last_active_at"`
-}
+//type UserMetrics struct {
+//	UserID        string    `json:"user_id"`
+//	PageViewCount int64     `json:"page_view_count"`
+//	LastActiveAt  time.Time `json:"last_active_at"`
+//}
 
 // -------------------------------------------------------------------
 // GET /metrics?user_id=X
@@ -77,8 +80,8 @@ func (h *EventHandler) HandleGetMetrics(w http.ResponseWriter, r *http.Request) 
 
 	resp := MetricsResponse{
 		UserID:       metrics.UserID,
-		PageViews:    metrics.PageViewCount,
-		LastActiveAt: metrics.LastActiveAt,
+		PageViews:    int64(metrics.PageViewCount),
+		LastActiveAt: metrics.LastActiveAt.Time,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -88,19 +91,10 @@ func (h *EventHandler) HandleGetMetrics(w http.ResponseWriter, r *http.Request) 
 
 	log.InfoContext(ctx, "metrics served",
 		slog.String("user_id", userID),
-		slog.Int64("page_view_count", metrics.PageViewCount),
+		slog.Int64("page_view_count", int64(metrics.PageViewCount)),
 	)
 }
 
-// isNotFound returns true for "no rows" errors from both pgx and database/sql.
-// Centralising this check makes it trivial to extend later.
 func isNotFound(err error) bool {
-	// pgx v5
-	// return errors.Is(err, pgx.ErrNoRows)
-	// database/sql
-	// return errors.Is(err, sql.ErrNoRows)
-	//
-	// For now we do a string match that works for both; replace with the import
-	// once you've pinned your DB driver.
-	return err != nil && err.Error() == "no rows in result set"
+	return errors.Is(err, pgx.ErrNoRows)
 }

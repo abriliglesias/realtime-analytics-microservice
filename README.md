@@ -12,8 +12,12 @@ A production-grade, event-driven analytics pipeline built with **Go**, **Apache 
   - [Aggregation-First Database Strategy](#1-aggregation-first-database-strategy)
   - [Horizontal Scalability via Kafka Partitions & Worker Pool](#2-horizontal-scalability-via-kafka-partitions--goroutine-worker-pool)
   - [Dependency Injection & Testable Architecture](#3-dependency-injection--testable-architecture)
-  - [Graceful Shutdown](#4-graceful-shutdown-bonus)
-  - [Zero-Dependency Developer Experience](#5-zero-dependency-developer-experience)
+  - [Dead-Letter Queue](#4-dead-letter-queue-dlq)
+  - [Observability — Structured Logging & Trace IDs](#5-observability--structured-logging--trace-ids)
+  - [Strict Input Validation](#6-strict-input-validation)
+  - [Graceful Shutdown & Retry Logic](#7-graceful-shutdown--retry-logic)
+  - [Bulletproof Health Checks](#8-bulletproof-health-checks)
+  - [Zero-Dependency Developer Experience](#9-zero-dependency-developer-experience)
 - [Tech Stack](#tech-stack)
 - [Getting Started](#getting-started)
 - [Makefile Reference](#makefile-reference)
@@ -27,7 +31,7 @@ A production-grade, event-driven analytics pipeline built with **Go**, **Apache 
 ```
 ┌─────────────────┐     HTTP POST      ┌──────────────────────┐
 │   External       │ ─────────────────► │   Producer API       │
-│   Client         │                    │   (Go REST, :8080)   │
+│   Client         │                    │   (Go REST, :8081)   │
 └─────────────────┘                    └──────────┬───────────┘
                                                    │  Produces Message
                                                    ▼
@@ -39,8 +43,8 @@ A production-grade, event-driven analytics pipeline built with **Go**, **Apache 
                                         └──────────┬───────────┘
                                                    │  Consumes (x3 Workers)
                                                    ▼
-                                        ┌──────────────────────┐
-                                        │   Consumer Worker    │
+                                        ┌──────────────────────┐     permanent error
+                                        │   Consumer Worker    │ ──────────────────►  incoming.user_activity.dlq
                                         │   (Goroutine Pool)   │
                                         └──────────┬───────────┘
                                                    │  UPSERT (atomic)
@@ -79,11 +83,12 @@ analytics-project/
 Instead of a raw event log, the consumer performs an atomic `UPSERT` directly into a `user_metrics` table:
 
 ```sql
-INSERT INTO user_metrics (user_id, page_view_count)
-VALUES ($1, $2)
+INSERT INTO user_metrics (user_id, page_view_count, last_active_at)
+VALUES ($1, $2, NOW())
 ON CONFLICT (user_id)
 DO UPDATE SET
-  page_view_count = user_metrics.page_view_count + EXCLUDED.page_view_count;
+  page_view_count = user_metrics.page_view_count + EXCLUDED.page_view_count,
+  last_active_at  = NOW();
 ```
 
 **Why this matters:**
@@ -104,7 +109,7 @@ The system is designed to scale its throughput linearly by adding more consumer 
 The `incoming.user_activity` topic is created with **3 partitions**, enabling true parallelism:
 
 ```bash
-kafka-topics.sh --create \
+kafka-topics --create \
   --topic incoming.user_activity \
   --partitions 3 \
   --replication-factor 1
@@ -133,56 +138,155 @@ To scale further, increase the partition count and deploy additional consumer in
 
 Global variables in Go services are a common anti-pattern: they create hidden coupling, make testing difficult, and introduce subtle data races.
 
-This project avoids them entirely by using **struct-based Dependency Injection**. HTTP handlers are methods on an `EventHandler` struct that holds its dependencies explicitly:
+This project avoids them entirely by using **struct-based Dependency Injection**. HTTP handlers are methods on an `EventHandler` struct that holds its dependencies behind interfaces:
 
 ```go
+// KafkaWriter is an interface — not the concrete *kafka.Writer type.
+// This allows the handler to be tested by injecting a mock,
+// with zero changes to production code.
+type KafkaWriter interface {
+    WriteMessages(ctx, ...kafka.Message) error
+}
+
 type EventHandler struct {
-    writer *kafka.Writer
+    writer KafkaWriter
+    db     Querier
 }
 
-func NewEventHandler(writer *kafka.Writer) *EventHandler {
-    return &EventHandler{writer: writer}
-}
-
-func (h *EventHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
-    // h.writer is an injected, mockable dependency
+func NewEventHandler(writer KafkaWriter, db Querier) *EventHandler {
+    return &EventHandler{writer: writer, db: db}
 }
 ```
 
-**Benefits:**
-
-- **Testability** — The Kafka writer can be swapped for a mock in unit tests without touching production code.
-- **No data races** — Dependencies are initialized once and passed explicitly.
-- **Extensibility** — Adding a new dependency (e.g., a metrics client) is a one-line change to the struct.
+Unit tests inject a `mockKafkaWriter` that records every message written, enabling table-driven tests for all handler paths — valid payloads, missing fields, oversized bodies, and broker failures — without a live Kafka broker.
 
 ---
 
-### 4. Graceful Shutdown 
+### 4. Dead-Letter Queue (DLQ)
 
-Both microservices implement OS signal handling to shut down cleanly, preventing data loss or corrupted state during container restarts and rolling deployments.
+The consumer distinguishes between two failure classes, each with a different resolution strategy:
+
+| Error class | Example | Behaviour |
+|---|---|---|
+| **Permanent** | Malformed JSON, missing `user_id` | Routed to DLQ immediately — retrying will never help |
+| **Transient** | DB connection timeout | Exponential backoff up to 5 retries, then DLQ |
+
+Failed messages are published to `incoming.user_activity.dlq` with diagnostic headers attached:
+
+```
+trace_id        — correlates with the originating HTTP request
+dlq_reason      — human-readable failure description
+original_topic  — source topic for replay tooling
+original_offset — exact Kafka offset of the failed message
+failed_at       — RFC3339 timestamp
+```
+
+This means no message is ever silently dropped, and every failure is inspectable and replayable.
+
+---
+
+### 5. Observability — Structured Logging & Trace IDs
+
+Every HTTP request is assigned a UUID `trace_id` by a middleware in the Producer API. The trace ID is:
+
+1. Injected into the request `context.Context`
+2. Set as an `X-Trace-ID` response header for client-side correlation
+3. Embedded as a **Kafka message header** (not in the payload body) so it crosses the service boundary
+4. Extracted by every Consumer worker and included in all subsequent log entries
+
+The result is a correlated log chain across two services for every event:
+
+```json
+// Producer (request received)
+{"level":"INFO","trace_id":"f47ac10b-58cc","msg":"request received","method":"POST","path":"/event"}
+
+// Producer (enqueued)
+{"level":"INFO","trace_id":"f47ac10b-58cc","msg":"event accepted and enqueued"}
+
+// Consumer (persisted) — same trace_id, different process
+{"level":"INFO","trace_id":"f47ac10b-58cc","msg":"event persisted","user_id":"user-abc","worker_id":2}
+```
+
+All logging uses Go's standard library `log/slog` with the JSON handler — no external logging dependency, machine-parseable output ready for any log aggregator.
+
+---
+
+### 6. Strict Input Validation
+
+The `POST /event` endpoint applies three guards before a message touches Kafka:
 
 ```go
-quit := make(chan os.Signal, 1)
-signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-<-quit
+// Guard 1: Prevent memory exhaustion — enforced at the I/O layer,
+// not via Content-Length (which can be spoofed or omitted).
+r.Body = http.MaxBytesReader(w, r.Body, 1*1024*1024) // 1 MB hard limit
 
-// Shutdown sequence:
-// 1. Stop accepting new HTTP connections (producer)
-// 2. Flush and close the Kafka writer/reader
-// 3. Close the PostgreSQL connection pool (consumer)
+// Guard 2: Body must not be empty.
+// Guard 3: Must be valid JSON with a non-empty user_id field.
+if err := validateEvent(body); err != nil {
+    http.Error(w, err.Error(), http.StatusBadRequest)
+    return
+}
 ```
 
-The consumer also implements **exponential backoff retry logic** for database writes, ensuring transient connectivity issues (e.g., a PostgreSQL container restart) do not result in dropped messages.
+Requests that fail validation receive a `400 Bad Request` with a descriptive message. Payloads exceeding 1 MB receive `413 Request Entity Too Large`. Neither path reaches the Kafka writer.
 
 ---
 
-### 5. Zero-Dependency Developer Experience
+### 7. Graceful Shutdown & Retry Logic
 
-The entire project runs with nothing installed on the host machine except **Docker and Make**.
+Both microservices use `os/signal` to intercept `SIGTERM` and `SIGINT`, shutting down cleanly for container restarts and rolling deployments:
 
-- **Multi-Stage Dockerfiles** — Each Go service uses a multi-stage build: a `golang:alpine` builder compiles the binary, and a minimal `alpine` image ships it. This keeps production images lean and free of build toolchain bloat.
-- **Dockerized tooling** — `sqlc` code generation and database migrations run inside temporary `golang:alpine` containers (`docker run --rm`). No Go, no `sqlc`, no `migrate` binary needed locally.
-- **`docker-compose.yml`** — A single file orchestrates Kafka, Zookeeper, PostgreSQL, the Producer API, and the Consumer Worker with correct dependency ordering and health checks.
+```go
+// Shutdown sequence (Producer):
+// 1. Stop accepting new HTTP connections (15s drain window)
+// 2. Flush and close the Kafka writer
+// 3. Close the PostgreSQL connection pool
+
+// Shutdown sequence (Consumer):
+// 1. Cancel the worker pool context — workers finish their current message
+// 2. Close all Kafka readers (offsets committed)
+// 3. Close the DLQ writer
+```
+
+The consumer also implements **exponential backoff** for transient DB failures, with each retry doubling the wait time up to a 30-second ceiling before routing to the DLQ.
+
+---
+
+### 8. Bulletproof Health Checks
+
+Kafka has a well-known startup race condition: the JVM process and port 9092 become available before the broker is ready to accept client connections. A simple `depends_on` without a health check causes the Go services to fail on first boot.
+
+The `docker-compose.yml` uses a native Kafka probe that performs a real metadata request:
+
+```yaml
+kafka:
+  healthcheck:
+    test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list > /dev/null 2>&1 || exit 1"]
+    interval: 15s
+    timeout: 10s
+    retries: 10
+    start_period: 30s   # Give the JVM time to load before first probe
+
+producer:
+  depends_on:
+    kafka:
+      condition: service_healthy   # NOT service_started
+    postgres:
+      condition: service_healthy
+```
+
+This probe only passes when the broker can actually service metadata requests — not just when the port is open.
+
+---
+
+### 9. Zero-Dependency Developer Experience
+
+The entire stack runs with nothing installed on the host except **Docker**, **make**, and (for local development only) **Go**.
+
+- **Multi-Stage Dockerfiles** — A `golang:alpine` builder compiles the binary; a bare `alpine` image ships it. Production images contain no build toolchain.
+- **Dockerized `sqlc`** — Code generation runs via `docker run --rm sqlc/sqlc:1.26.0`, pinning the version and requiring nothing locally.
+- **Cross-platform Makefile** — All targets work on Linux, macOS, and Windows (via Git Bash or WSL). `SHELL := /bin/bash` with `-euo pipefail` ensures failures are loud, not silent.
+- **`.env`-based configuration** — All ports, credentials, and topic names live in `.env` (copied from `.env.example`). No hardcoded values anywhere.
 
 ---
 
@@ -203,43 +307,56 @@ The entire project runs with nothing installed on the host machine except **Dock
 
 ### Prerequisites
 
-- [Docker](https://docs.docker.com/get-docker/)
-- [Docker Compose](https://docs.docker.com/compose/install/)
+- [Docker](https://docs.docker.com/get-docker/) + Docker Compose
 - `make`
+- Go 1.21+ *(only required for `make run-producer`, `make run-consumer`, and `make test` — all other targets run inside Docker)*
 
-That's it. No Go installation. No local database. No Kafka client tools.
+### 1. Configure environment
 
-### 1. Start the full stack
+```bash
+cp .env.example .env
+# Edit .env if you need to change ports or credentials
+```
+
+### 2. Start the full stack
 
 ```bash
 make up
 ```
 
-This builds the Go service images and starts Kafka, Zookeeper, PostgreSQL, the Producer API, and the Consumer Worker in detached mode.
+Builds the Go service images and starts Kafka, Zookeeper, PostgreSQL, the Producer API, and the Consumer Worker in detached mode.
 
-### 2. Initialize the database schema
-
-```bash
-make init-db
-```
-
-Runs migrations inside a temporary Docker container against the running PostgreSQL instance.
-
-### 3. Create the partitioned Kafka topic
+### 3. Create Kafka topics
 
 ```bash
 make create-topic
 ```
 
-Creates `incoming.user_activity` with 3 partitions inside the Kafka container.
+Creates `incoming.user_activity` (3 partitions) and `incoming.user_activity.dlq` (1 partition). Idempotent — safe to re-run.
 
-### 4. Send a test event
+### 4. Initialize the database schema
+
+```bash
+make init-db
+```
+
+Polls until Postgres is ready, then runs migrations. Idempotent — safe to re-run.
+
+### 5. Send a test event
 
 ```bash
 make test-api
 ```
 
 Fires a `curl` request to the Producer API and traces the event through Kafka into the database.
+
+### 6. Query the aggregated metrics
+
+```bash
+curl "http://localhost:8081/metrics?user_id=user_123"
+```
+
+Returns the pre-aggregated `page_view_count` and `last_active_at` for the user — an O(1) primary-key lookup.
 
 ### Teardown
 
@@ -257,11 +374,21 @@ Stops and removes all containers and volumes.
 |---|---|
 | `make up` | Build images and start all containers (detached) |
 | `make down` | Stop and remove all containers and volumes |
-| `make init-db` | Run database migrations via temporary Docker container |
-| `make create-topic` | Create the `incoming.user_activity` Kafka topic (3 partitions) |
+| `make logs` | Tail logs from all services |
+| `make logs-<service>` | Tail logs for one service, e.g. `make logs-producer` |
+| `make status` | Show running container state |
+| `make init-db` | Run database migrations (idempotent) |
+| `make create-topic` | Create Kafka topics — main + DLQ (idempotent) |
 | `make generate` | Run `sqlc generate` via temporary Docker container |
-| `make test-api` | Send a sample `curl` request to the Producer API |
-| `make logs` | Tail logs from all running services |
+| `make sqlc` | Alias for `make generate` |
+| `make test` | Run all unit tests with race detector (`-race`) |
+| `make test-api` | Send a sample `curl` request to smoke-test the pipeline |
+| `make test-load` | Run the concurrent load test |
+| `make run-producer` | Run the Producer API locally outside Docker |
+| `make run-consumer` | Run the Consumer worker locally outside Docker |
+| `make check-deps` | Verify Docker and Compose are available |
+
+> Run `make help` for the full self-documenting reference with section groupings.
 
 ---
 
@@ -269,27 +396,63 @@ Stops and removes all containers and volumes.
 
 ### `POST /event`
 
-Ingests a user activity event and publishes it to Kafka.
+Ingests a user activity event, validates it, and publishes it to Kafka.
 
 **Request Body:**
 
 ```json
 {
   "user_id": "user-abc-123",
-  "event_type": "page_view",
+  "activity_type": "page_view",
   "metadata": {
-    "page": "/home"
+    "page_url": "https://example.com"
   }
 }
 ```
 
-**Response:**
+**Validation rules:** `user_id` is required and must be non-empty. Body must be valid JSON and under 1 MB.
 
-```
-202 Accepted
+**Responses:**
+
+| Status | Meaning |
+|---|---|
+| `202 Accepted` | Event enqueued — not yet persisted (async by design) |
+| `400 Bad Request` | Missing `user_id`, empty body, or invalid JSON |
+| `413 Request Entity Too Large` | Body exceeds 1 MB |
+| `500 Internal Server Error` | Kafka broker unreachable |
+
+**Response header:** `X-Trace-ID: <uuid>` — use this to correlate logs end-to-end.
+
+---
+
+### `GET /metrics?user_id=X`
+
+Returns pre-aggregated metrics for a user. This is an O(1) primary-key lookup — no on-the-fly aggregation.
+
+**Example:**
+
+```bash
+curl "http://localhost:8081/metrics?user_id=user-abc-123"
 ```
 
-The `202` status intentionally signals that the event has been accepted and enqueued — not that it has been persisted. This reflects the async nature of the pipeline.
+**Response `200 OK`:**
+
+```json
+{
+  "user_id": "user-abc-123",
+  "page_view_count": 42,
+  "last_active_at": "2026-06-03T14:22:11Z"
+}
+```
+
+**Responses:**
+
+| Status | Meaning |
+|---|---|
+| `200 OK` | Metrics returned |
+| `400 Bad Request` | `user_id` query parameter missing |
+| `404 Not Found` | No events recorded for this user |
+| `503 Service Unavailable` | Database not initialised |
 
 ---
 

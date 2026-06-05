@@ -1,7 +1,7 @@
 package main
 
 import (
-	"analytics-consumer/internal/db"
+	"analytics/internal/db"
 	"context"
 	"encoding/json"
 	"errors"
@@ -46,18 +46,12 @@ func main() {
 	}
 
 	// --- DB pool ---
-	// FIX 1: getEnv provides a fallback so an unset DATABASE_URL produces a
-	// clear fatal error ("cannot be empty") instead of a cryptic pgx message.
 	dbURL := getEnv("DATABASE_URL", "")
 	if dbURL == "" {
 		slog.Error("DATABASE_URL environment variable is not set — cannot connect to PostgreSQL")
 		os.Exit(1)
 	}
 
-	// FIX 2: The error from pgxpool.New was previously discarded with _.
-	// If the connection string is malformed or the DB is unreachable at parse
-	// time, pool is nil and every subsequent query silently fails (or panics).
-	// Now we treat this as a fatal startup error.
 	pool, err := pgxpool.New(context.Background(), dbURL)
 	if err != nil {
 		slog.Error("failed to create PostgreSQL connection pool",
@@ -67,11 +61,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// FIX 3: Ping verifies the pool can actually reach the database, not just
-	// that the connection string parsed successfully. Without this, a wrong
-	// password or a DB that isn't ready yet produces no error until the first
-	// query fires inside a worker — at which point the error is swallowed by
-	// writeWithRetry and messages silently drain into the DLQ.
 	if err := pool.Ping(context.Background()); err != nil {
 		slog.Error("PostgreSQL ping failed — is the database running and reachable?",
 			slog.String("database_url", dbURL),

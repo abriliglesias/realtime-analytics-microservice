@@ -13,7 +13,7 @@ func main() {
 	// If running inside Docker, override with LOAD_TEST_URL.
 	url := os.Getenv("LOAD_TEST_URL")
 	if url == "" {
-		url = "http://localhost:8080/event"
+		url = "http://localhost:8081/event"
 	}
 
 	// We will simulate 15 fast clicks from the same user

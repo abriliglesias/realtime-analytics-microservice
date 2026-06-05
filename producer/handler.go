@@ -1,6 +1,7 @@
 package main
 
 import (
+	"analytics/internal/db" // Adjust this if your go.mod name is different
 	"context"
 	"encoding/json"
 	"errors"
@@ -26,16 +27,14 @@ type KafkaWriter interface {
 }
 
 // EventHandler holds injected dependencies for the HTTP handlers.
-// Using a struct (rather than package-level vars) prevents data races and
-// makes every dependency explicit — both for readers and test authors.
 type EventHandler struct {
 	writer KafkaWriter
-	db     Querier // nil-safe; only populated when the read-model is enabled
+	db     *db.Queries
 }
 
 // NewEventHandler constructs an EventHandler with its required dependencies.
-func NewEventHandler(writer KafkaWriter, db Querier) *EventHandler {
-	return &EventHandler{writer: writer, db: db}
+func NewEventHandler(writer KafkaWriter, queries *db.Queries) *EventHandler {
+	return &EventHandler{writer: writer, db: queries}
 }
 
 // -------------------------------------------------------------------

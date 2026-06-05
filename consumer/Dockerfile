@@ -1,48 +1,20 @@
-# NOTE: This Dockerfile is nearly identical to the producer's Dockerfile.
-# The only difference is the compiled binary name and the removal of EXPOSE 8080,
-# because the consumer only reads from Kafka and doesn't expose HTTP ports.
 
-# Build ----------------
 FROM golang:alpine AS builder
-
-# Install necessary dependencies for compilation if needed
-RUN apk add --no-cache git ca-certificates tzdata
 
 WORKDIR /app
 
-# Copy module definition files first (to leverage Docker cache)
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy the rest of the source code
-COPY . .
+COPY internal/ ./internal/
+COPY consumer/  ./consumer/
 
-# Compile the optimized binary for container environments:
-# - CGO_ENABLED=0: Disables dynamic linking to C libraries, generating a purely static binary.
-# - GOOS=linux: Ensures the binary is compiled for the Linux kernel.
-# - ldflags "-s -w": Reduces binary size by removing the symbol table and debugging information.
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o analytics-consumer .
+RUN CGO_ENABLED=0 GOOS=linux go build -o /consumer ./consumer
 
-# Minimal Execution Environment ----------------
-FROM alpine:3.19 AS runner
+FROM alpine:3.20
 
-# Create a non-privileged user for security reasons (Principle of least privilege)
-RUN adduser -D -g '' appuser
-
-# Copy certificates and timezone data from the build stage
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
-
+RUN apk --no-cache add ca-certificates tzdata
 WORKDIR /app
+COPY --from=builder /consumer .
 
-# Copy only the compiled binary from the previous stage
-COPY --from=builder /app/analytics-consumer .
-
-# Change file ownership to the non-root user
-RUN chown -R appuser:appuser /app
-
-# Switch to the non-privileged user
-USER appuser
-
-# Default command to start the microservice
-CMD ["./analytics-consumer"]
+ENTRYPOINT ["./consumer"]
