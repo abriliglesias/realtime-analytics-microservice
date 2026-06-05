@@ -65,6 +65,7 @@ The system is composed of two independently deployable Go microservices that com
 analytics-project/
 ├── docker-compose.yml       # Orchestrates infra and Go apps
 ├── Makefile                 # Automates all DX tasks
+├── internal/                # Shared private logic (e.g., domain models, interfaces, shared utils)
 ├── database/                # Schema, queries, and sqlc config
 ├── producer/                # Go REST API + Dockerfile
 └── consumer/                # Go Worker + Dockerfile
