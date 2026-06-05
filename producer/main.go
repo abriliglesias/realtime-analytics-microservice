@@ -1,6 +1,7 @@
 package main
 
 import (
+	"analytics/internal/db" // Adjust this if your go.mod name is different
 	"context"
 	"log/slog"
 	"net/http"
@@ -44,12 +45,11 @@ func main() {
 	slog.Info("connected to postgres")
 
 	// Wrap the pgxpool with the sqlc-generated Queries type.
-	// Uncomment once your database package is in place:
-	//   queries := db.New(pool)
-	//   handler := NewEventHandler(writer, queries)
+	queries := db.New(pool)
+	handler := NewEventHandler(writer, queries)
 	//
-	// For now, pass nil to keep compilation clean:
-	handler := NewEventHandler(writer, nil)
+	// pass nil to keep compilation clean:
+	// handler := NewEventHandler(writer, nil)
 
 	// --- Router ---
 	mux := http.NewServeMux()
