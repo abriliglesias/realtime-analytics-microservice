@@ -9,8 +9,6 @@ import (
 )
 
 func main() {
-	// Use localhost by default for local execution.
-	// If running inside Docker, override with LOAD_TEST_URL.
 	url := os.Getenv("LOAD_TEST_URL")
 	if url == "" {
 		url = "http://localhost:8081/event"

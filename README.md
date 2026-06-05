@@ -317,6 +317,14 @@ The entire stack runs with nothing installed on the host except **Docker**, **ma
 cp .env.example .env
 # Edit .env if you need to change ports or credentials
 ```
+The .env file is required — docker-compose.yml uses variable interpolation (${POSTGRES_USER}, etc.) for service configuration. Without it, the database connection URL resolves to empty credentials and the Go services will fail to connect.
+
+| Variable | Default | Used by |
+|---|---|---|
+| POSTGRES_USER | user | PostgreSQL container + DATABASE_URL for Producer & Consumer |
+| POSTGRES_PASSWORD | password | PostgreSQL container + DATABASE_URL for Producer & Consumer |
+| POSTGRES_DB | analytics | PostgreSQL container + DATABASE_URL for Producer & Consumer |
+| `PRODUCER_P
 
 ### 2. Start the full stack
 

@@ -1,7 +1,7 @@
 package main
 
 import (
-	"analytics/internal/db" // Adjust this if your go.mod name is different
+	"analytics/internal/db"
 	"context"
 	"encoding/json"
 	"errors"

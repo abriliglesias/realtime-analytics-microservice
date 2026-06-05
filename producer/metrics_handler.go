@@ -11,21 +11,6 @@ import (
 )
 
 // -------------------------------------------------------------------
-// Querier interface (mirrors what sqlc generates)
-// -------------------------------------------------------------------
-
-//type Querier interface {
-//	GetUserMetrics(ctx interface{ Done() <-chan struct{} }, userID string) (*UserMetrics, error)
-//}
-
-// UserMetrics mirrors the sqlc-generated row type for the user_metrics table.
-//type UserMetrics struct {
-//	UserID        string    `json:"user_id"`
-//	PageViewCount int64     `json:"page_view_count"`
-//	LastActiveAt  time.Time `json:"last_active_at"`
-//}
-
-// -------------------------------------------------------------------
 // GET /metrics?user_id=X
 // -------------------------------------------------------------------
 
@@ -64,7 +49,7 @@ func (h *EventHandler) HandleGetMetrics(w http.ResponseWriter, r *http.Request) 
 	metrics, err := h.db.GetUserMetrics(ctx, userID)
 	if err != nil {
 		// Distinguish "not found" from a real DB error so clients get the right
-		// status code. pgx returns pgx.ErrNoRows; adapt if you use database/sql.
+		// status code. pgx returns pgx.ErrNoRows;
 		if isNotFound(err) {
 			log.InfoContext(ctx, "user not found", slog.String("user_id", userID))
 			http.Error(w, "user not found", http.StatusNotFound)
